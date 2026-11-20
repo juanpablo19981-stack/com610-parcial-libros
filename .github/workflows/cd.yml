@@ -66,8 +66,21 @@ jobs:
     needs: publish
     if: needs.publish.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+      EC2_FINGERPRINT: ${{ secrets.EC2_FINGERPRINT }}
+      GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
     steps:
+      - name: Informar secretos pendientes para EC2
+        if: ${{ env.EC2_HOST == '' || env.EC2_USER == '' || env.EC2_SSH_KEY == '' || env.EC2_FINGERPRINT == '' || env.GHCR_USERNAME == '' || env.GHCR_TOKEN == '' }}
+        run: |
+          echo "::warning::Imagen construida y publicada, pero no se desplegó porque faltan secretos de EC2/GHCR."
+          echo "Configura EC2_HOST, EC2_USER, EC2_SSH_KEY, EC2_FINGERPRINT, GHCR_USERNAME y GHCR_TOKEN en Settings > Secrets and variables > Actions." >> "$GITHUB_STEP_SUMMARY"
       - name: Desplegar por SSH con verificación y rollback
+        if: ${{ env.EC2_HOST != '' && env.EC2_USER != '' && env.EC2_SSH_KEY != '' && env.EC2_FINGERPRINT != '' && env.GHCR_USERNAME != '' && env.GHCR_TOKEN != '' }}
         uses: appleboy/ssh-action@v1.2.5
         env:
           IMAGE: ${{ needs.publish.outputs.image }}:${{ github.sha }}
