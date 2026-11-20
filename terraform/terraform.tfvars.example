@@ -1,0 +1,10 @@
+# Copia a terraform.tfvars y reemplaza TODOS los valores ficticios.
+# terraform.tfvars está excluido de Git.
+aws_region     = "us-east-1"
+project_name   = "tus-iniciales-com610-libros"
+ssh_cidr       = "203.0.113.10/32" # Sustituir por TU IP pública real.
+public_key_path = "~/.ssh/com610_ec2.pub"
+instance_type  = "t3.micro"
+db_name        = "catalogo_libros"
+db_username    = "app_libros"
+db_password    = "CAMBIAR-POR-UNA-CLAVE-LARGA-Y-UNICA"

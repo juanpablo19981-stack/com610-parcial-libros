@@ -1,0 +1,139 @@
+name: CD - publicar y desplegar en EC2
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: libros-api-deploy-main
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: 1. Pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm install
+      - run: npm test
+
+  publish:
+    name: 2. Construir y publicar imagen en GHCR
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Definir nombre de imagen en minúsculas
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Preparar Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Autenticarse en GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Construir y publicar imagen etiquetada con SHA
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+          tags: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  deploy:
+    name: 3. Desplegar y verificar en EC2
+    needs: publish
+    if: needs.publish.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Desplegar por SSH con verificación y rollback
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}:${{ github.sha }}
+          EXPECTED_VERSION: ${{ github.sha }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
+          envs: IMAGE,EXPECTED_VERSION,GHCR_USERNAME,GHCR_TOKEN
+          script: |
+            set -Eeuo pipefail
+            APP_DIR=/opt/libros-api
+            ENV_FILE="$APP_DIR/.env"
+            test -f "$ENV_FILE" || { echo "Falta $ENV_FILE; configura RDS antes del despliegue."; exit 1; }
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+            if ! docker pull "$IMAGE"; then
+              docker logout ghcr.io >/dev/null 2>&1 || true
+              exit 1
+            fi
+            docker logout ghcr.io >/dev/null 2>&1 || true
+
+            OLD_IMAGE="$(docker inspect --format='{{.Config.Image}}' libros-api 2>/dev/null || true)"
+            docker rm -f libros-api >/dev/null 2>&1 || true
+            docker run -d --name libros-api --restart unless-stopped \
+              --env-file "$ENV_FILE" -e APP_VERSION="$EXPECTED_VERSION" \
+              -p 127.0.0.1:3000:3000 "$IMAGE" || true
+
+            ok=false
+            for attempt in $(seq 1 18); do
+              if HEALTH="$(curl -fsS http://127.0.0.1/health 2>/dev/null)" && \
+                 printf '%s' "$HEALTH" | grep -Fq "$EXPECTED_VERSION" && \
+                 curl -fsS http://127.0.0.1/libros >/dev/null; then
+                ok=true
+                break
+              fi
+              sleep 5
+            done
+
+            if [ "$ok" = true ]; then
+              echo "Despliegue exitoso: $IMAGE"
+              exit 0
+            fi
+
+            echo "La nueva versión no superó /health o /libros. Iniciando rollback..."
+            docker rm -f libros-api >/dev/null 2>&1 || true
+            if [ -n "$OLD_IMAGE" ]; then
+              docker run -d --name libros-api --restart unless-stopped \
+                --env-file "$ENV_FILE" -p 127.0.0.1:3000:3000 "$OLD_IMAGE"
+              restored=false
+              for attempt in $(seq 1 12); do
+                if curl -fsS http://127.0.0.1/health >/dev/null && \
+                   curl -fsS http://127.0.0.1/libros >/dev/null; then
+                  restored=true
+                  break
+                fi
+                sleep 5
+              done
+              if [ "$restored" = true ]; then
+                echo "Rollback completado. La versión anterior vuelve a estar activa."
+              else
+                echo "ERROR: no se pudo verificar la versión anterior restaurada."
+              fi
+            else
+              echo "No existía una versión previa para restaurar (primer despliegue)."
+            fi
+            exit 1

@@ -1,0 +1,12 @@
+node_modules/
+coverage/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/terraform.tfvars
+.DS_Store
