@@ -10,7 +10,7 @@ COPY src ./src
 ARG APP_VERSION=local
 ENV APP_VERSION=${APP_VERSION}
 ENV PORT=3000
-EXPOSU 3000
+EXPOSE 3000
 
 USER node
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=5 \
